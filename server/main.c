@@ -28,7 +28,7 @@ void set_nonblocking(int sockfd) {
 
 // 클라이언트 버퍼 초기화
 int init_client_buffer(int client_fd) {
-    client_buffers[client_fd].data = (char *)malloc(BUFFER_SIZE);
+    client_buffers[client_fd].data = (char *) malloc(BUFFER_SIZE);
     if (!client_buffers[client_fd].data) {
         return 0;
     }
@@ -51,7 +51,7 @@ int append_to_buffer(int client_fd, const char *data, size_t len, struct pollfd 
 
     if (buf->length + len > buf->capacity) {
         size_t new_capacity = buf->capacity * 2;
-        char *new_data = (char *)realloc(buf->data, new_capacity);
+        char *new_data = (char *) realloc(buf->data, new_capacity);
         if (!new_data) {
             return 0;
         }
@@ -62,7 +62,7 @@ int append_to_buffer(int client_fd, const char *data, size_t len, struct pollfd 
     memcpy(buf->data + buf->length, data, len);
     buf->length += len;
 
-    // 데이터가 추가되었으므로 POLLOUT 활성화
+    // 버퍼에 데이터가 존재하므로 POLLOUT 활성화
     for (int i = 0; i < nfds; i++) {
         if (fds[i].fd == client_fd) {
             fds[i].events |= POLLOUT;
@@ -96,7 +96,7 @@ int receive_data(int client_fd, struct pollfd *fds, int nfds) {
 }
 
 // 클라이언트에게 데이터 전송
-int send_data(int client_fd) {
+int send_data(int client_fd, struct pollfd *fds, int nfds) {
     struct client_buffer *buf = &client_buffers[client_fd];
 
     if (buf->length == 0) return 1; // 보낼 데이터 없음
@@ -109,31 +109,36 @@ int send_data(int client_fd) {
 
         // 데이터가 모두 전송되었으면 POLLOUT 비활성화
         if (buf->length == 0) {
-            //buf 초기화
-            free_client_buffer(client_fd);
-            if (!init_client_buffer(client_fd)) {
-                perror("Memory allocation failed");
-                return 0; // 전송 오류 발생
+            for (int i = 0; i < nfds; i++) {
+                if (fds[i].fd == client_fd) {
+                    fds[i].events &= ~POLLOUT;
+                    // TODO: buf->data 초기화
+                    break;
+                }
             }
-            return 2; // POLLOUT 비활성화 신호
         }
-        return 1; // 계속 POLLOUT 유지
+        return 1;
     } else if (bytes_sent < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 1; // 송신 버퍼가 가득 찼으므로 POLLOUT 유지
+            return 1;
         } else {
             perror("send failed");
-            return 0; // 전송 오류 발생
+            return 0;
         }
     }
 
-    return 0; // 클라이언트 연결 종료
+    return 0;
 }
 
 int main() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int server_fd = socket(AF_INET, SOCK_STREAM | O_NONBLOCK | O_CLOEXEC, 0);
     if (server_fd == -1) {
         perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt failed");
         exit(EXIT_FAILURE);
     }
 
@@ -142,7 +147,7 @@ int main() {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
 
-    if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+    if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1) {
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
@@ -162,18 +167,33 @@ int main() {
     printf("Server listening on port %d\n", PORT);
 
     while (1) {
-        const int ret = poll(fds, nfds, -1);
-        if (ret < 0) {
+        printf("-------------------------------\n");
+        int rc = poll(fds, nfds, 5000);
+
+        if (rc < 0) {
             perror("poll failed");
             exit(EXIT_FAILURE);
         }
+        if (rc == 0) {
+            printf("poll timeout\n");
+            continue;
+        }
+
+        printf("poll event: %d fds\n", rc);
 
         for (int i = 0; i < nfds; i++) {
+            printf("fd=%d, events=%d, revents=%d\n", fds[i].fd, fds[i].events, fds[i].revents);
+
+            if (fds[i].revents == 0) {
+                // 이벤트 없음
+                continue;
+            }
+
             if (fds[i].revents & POLLIN) {
                 if (fds[i].fd == server_fd) {
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+                    int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_len);
                     if (client_fd < 0) {
                         perror("accept failed");
                         continue;
@@ -182,20 +202,16 @@ int main() {
                     if (!init_client_buffer(client_fd)) {
                         perror("Memory allocation failed");
                         close(client_fd);
-                        sleep(3);
                         continue;
                     }
                     fds[nfds].fd = client_fd;
-                    fds[nfds].events = POLLIN | POLLOUT;
+                    fds[nfds].events = POLLIN;
                     nfds++;
 
                     printf("New client connected: %d\n", client_fd);
                 } else {
-                    // 클라이언트로부터 데이터 수신
                     int client_fd = fds[i].fd;
                     if (!receive_data(client_fd, fds, nfds)) {
-                        // 클라이언트가 연결을 종료함
-                        // 클라이언트 소켓을 닫고, 클라이언트 버퍼를 해제
                         close(client_fd);
                         free_client_buffer(client_fd);
                         fds[i] = fds[nfds - 1];
@@ -203,25 +219,24 @@ int main() {
                         printf("Client disconnected: %d\n", client_fd);
                     }
                 }
-            }
-
-            if (fds[i].revents & POLLOUT) {
+            } else if (fds[i].revents & POLLOUT) {
                 int client_fd = fds[i].fd;
-                if (client_buffers[client_fd].length > 0) {
-                    int result = send_data(client_fd);
-                    if (result == 0) {
-                        close(client_fd);
-                        free_client_buffer(client_fd);
-                        fds[i] = fds[nfds - 1];
-                        nfds--;
-                        printf("Client disconnected (send error): %d\n", client_fd);
-                    } else if (result == 2) {
-                        // 데이터가 모두 전송되었으므로 POLLOUT 비활성화
-                        fds[i].events &= ~POLLOUT;
-                    } else {
-                        // 계속 POLLOUT 유지
-                    }
+                if (!send_data(client_fd, fds, nfds)) {
+                    close(client_fd);
+                    free_client_buffer(client_fd);
+                    fds[i] = fds[nfds - 1];
+                    nfds--;
+                    printf("Client disconnected (send error): %d\n", client_fd);
                 }
+            } else if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                int client_fd = fds[i].fd;
+                close(client_fd);
+                free_client_buffer(client_fd);
+                fds[i] = fds[nfds - 1];
+                nfds--;
+                printf("Client disconnected (error): %d\n", client_fd);
+            } else {
+                printf("Unexpected poll event: %d\n", fds[i].revents);
             }
         }
     }
