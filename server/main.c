@@ -3,10 +3,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include "err_handle.h"
 
 #define PORT 12345
 #define BUFFER_SIZE 4
@@ -19,11 +19,17 @@ struct client_buffer {
 };
 
 struct client_buffer client_buffers[MAX_CLIENTS] = {0};
+int server_listen_ok = 0;
 
 // 소켓을 논블로킹 모드로 설정
 void set_nonblocking(int sockfd) {
     int flags = fcntl(sockfd, F_GETFL, 0);
     fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void set_cloexec(int sockfd) {
+    int flags = fcntl(sockfd, F_GETFD, 0);
+    fcntl(sockfd, F_SETFD, flags | FD_CLOEXEC);
 }
 
 // 클라이언트 버퍼 초기화
@@ -59,6 +65,7 @@ int append_to_buffer(int client_fd, const char *data, size_t len, struct pollfd 
         buf->capacity = new_capacity;
     }
 
+    // 기존 데이터 뒤에 새로운 데이터 추가
     memcpy(buf->data + buf->length, data, len);
     buf->length += len;
 
@@ -84,13 +91,14 @@ int receive_data(int client_fd, struct pollfd *fds, int nfds) {
         }
         return 1;
     } else if (bytes == 0) {
-        return 0; // 클라이언트가 연결 종료
+        // 클라이언트가 연결 종료
+        // 클라이언트 소켓을 닫고 버퍼를 해제
+        return 0;
     } else {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 1; // 더 읽을 데이터 없음
-        } else {
-            perror("recv failed");
+        if (!handle_receive_error()) {
             return 0; // 오류 발생
+        } else {
+            return 1; // 재시도
         }
     }
 }
@@ -119,11 +127,10 @@ int send_data(int client_fd, struct pollfd *fds, int nfds) {
         }
         return 1;
     } else if (bytes_sent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 1;
+        if (!handle_send_error()) {
+            return 0; // 오류 발생
         } else {
-            perror("send failed");
-            return 0;
+            return 1; // 재시도
         }
     }
 
@@ -131,48 +138,71 @@ int send_data(int client_fd, struct pollfd *fds, int nfds) {
 }
 
 int main() {
-    int server_fd = socket(AF_INET, SOCK_STREAM | O_NONBLOCK | O_CLOEXEC, 0);
-    if (server_fd == -1) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-    int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt failed");
-        exit(EXIT_FAILURE);
-    }
+    struct pollfd fds[MAX_CLIENTS] = {0};
+    int nfds = -1;
+    int server_fd = -1;
 
-    struct sockaddr_in server_addr = {0};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+    do {
+        server_fd = socket(AF_INET, SOCK_STREAM | O_NONBLOCK | O_CLOEXEC, 0);
+        if (server_fd == -1) {
+            if (handle_socket_error()) {
+                continue;
+            }
+            exit(EXIT_FAILURE);
+        }
 
-    if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
-    }
+        int opt = 1;
+        if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            if (handle_setsockopt_error()) {
+                close(server_fd);
+                continue;
+            }
+            close(server_fd);
+            exit(EXIT_FAILURE);
+        }
 
-    if (listen(server_fd, 10) == -1) {
-        perror("listen failed");
-        exit(EXIT_FAILURE);
-    }
+        struct sockaddr_in server_addr = {0};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(PORT);
 
-    set_nonblocking(server_fd);
+        if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1) {
+            if (handle_bind_error()) {
+                close(server_fd);
+                continue;
+            }
+            close(server_fd);
+            exit(EXIT_FAILURE);
+        }
 
-    struct pollfd fds[MAX_CLIENTS];
-    int nfds = 1;
-    fds[0].fd = server_fd;
-    fds[0].events = POLLIN;
+        if (listen(server_fd, 10) == -1) {
+            if (handle_listen_error()) {
+                close(server_fd);
+                continue;
+            }
+            close(server_fd);
+            exit(EXIT_FAILURE);
+        }
+
+        // init fds for server_fd
+        nfds = 1;
+        fds[0].fd = server_fd;
+        fds[0].events = POLLIN;
+
+        // server listen success
+        server_listen_ok = 1;
+    } while (!server_listen_ok);
 
     printf("Server listening on port %d\n", PORT);
 
     while (1) {
         printf("-------------------------------\n");
-        int rc = poll(fds, nfds, 5000);
-
+        const int rc = poll(fds, nfds, 5000);
         if (rc < 0) {
-            perror("poll failed");
-            exit(EXIT_FAILURE);
+            if (handle_poll_error()) {
+                continue;
+            }
+            break;
         }
         if (rc == 0) {
             printf("poll timeout\n");
@@ -195,10 +225,15 @@ int main() {
                     socklen_t client_len = sizeof(client_addr);
                     int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_len);
                     if (client_fd < 0) {
-                        perror("accept failed");
-                        continue;
+                        if (handle_accept_error()) {
+                            continue;
+                        }
+                        break;
                     }
+
                     set_nonblocking(client_fd);
+                    set_cloexec(client_fd);
+
                     if (!init_client_buffer(client_fd)) {
                         perror("Memory allocation failed");
                         close(client_fd);
@@ -217,6 +252,9 @@ int main() {
                         fds[i] = fds[nfds - 1];
                         nfds--;
                         printf("Client disconnected: %d\n", client_fd);
+                    } else {
+                        printf("Received data from client: %d\n", client_fd);
+                        // continue;
                     }
                 }
             } else if (fds[i].revents & POLLOUT) {
@@ -227,6 +265,8 @@ int main() {
                     fds[i] = fds[nfds - 1];
                     nfds--;
                     printf("Client disconnected (send error): %d\n", client_fd);
+                } else {
+                    printf("Sent data to client: %d\n", client_fd);
                 }
             } else if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
                 int client_fd = fds[i].fd;
@@ -237,10 +277,15 @@ int main() {
                 printf("Client disconnected (error): %d\n", client_fd);
             } else {
                 printf("Unexpected poll event: %d\n", fds[i].revents);
+                // continue;
             }
         }
     }
 
-    close(server_fd);
+    for (int i = 0; i < nfds; i++) {
+        close(fds[i].fd);
+        free_client_buffer(fds[i].fd);
+    }
+
     return 0;
 }

@@ -6,4 +6,4 @@ project(server C)
 set(CMAKE_C_COMPILER gcc)
 
 # Add an executable
-add_executable(server main.c)
+add_executable(server main.c err_handle.c err_handle.h)
