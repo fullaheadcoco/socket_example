@@ -1,4 +1,4 @@
-#include "err_handle.h"
+#include "../include/err_handle.h"
 #include <errno.h>
 #include <stdio.h>
 
@@ -291,6 +291,59 @@ int handle_send_error() {
             return 0;
         default:
             perror("[Error] send() failed");
+            return 0;
+    }
+}
+
+int handle_connect_error() {
+    switch (errno) {
+        case EACCES:
+            perror("[Error] connect() failed: Permission denied");
+            return 0;
+        case EADDRINUSE:
+            perror("[Error] connect() failed: Address already in use");
+            return 0;
+        case EADDRNOTAVAIL:
+            perror("[Error] connect() failed: Address not available");
+            return 0;
+        case EAFNOSUPPORT:
+            perror("[Error] connect() failed: Address family not supported");
+            return 0;
+        case EALREADY:
+            perror("[Error] connect() failed: Operation already in progress");
+            return 0;
+        case EBADF:
+            perror("[Error] connect() failed: Invalid socket descriptor");
+            return 0;
+        case ECONNREFUSED:
+            perror("[Error] connect() failed: Connection refused");
+            return 0;
+        case EFAULT:
+            perror("[Error] connect() failed: Invalid address pointer");
+            return 0;
+        case EINPROGRESS:
+            perror("[Error] connect() failed: Operation in progress");
+            return 1; // retry
+        case EINTR:
+            perror("[Error] connect() failed: Interrupted by signal");
+            return 0;
+        case EISCONN:
+            perror("[Error] connect() failed: Socket is already connected");
+            return 0;
+        case ENETUNREACH:
+            perror("[Error] connect() failed: Network is unreachable");
+            return 0;
+        case ENOTSOCK:
+            perror("[Error] connect() failed: Socket descriptor is not valid");
+            return 0;
+        case EPROTOTYPE:
+            perror("[Error] connect() failed: Protocol type not supported");
+            return 0;
+        case ETIMEDOUT:
+            perror("[Error] connect() failed: Connection timed out");
+            return 0;
+        default:
+            perror("[Error] connect() failed");
             return 0;
     }
 }

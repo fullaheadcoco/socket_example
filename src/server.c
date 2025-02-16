@@ -6,7 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include "err_handle.h"
+#include "../include/err_handle.h"
 
 #define PORT 12345
 #define BUFFER_SIZE 4

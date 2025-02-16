@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include "../include/err_handle.h"
 
 #define SERVER_IP "127.0.0.1"  // 서버 주소
 #define SERVER_PORT 12345       // 서버 포트
@@ -27,33 +28,44 @@ void set_nonblocking(int fd) {
 }
 
 int main() {
-    int sockfd;
-    struct sockaddr_in server_addr;
-    char buffer[BUFFER_SIZE];
+    int sockfd = -1;
+    struct sockaddr_in server_addr = {0};
+    char buffer[BUFFER_SIZE] = {0};
+    int socket_create_ok = 0;
 
-    // 소켓 생성
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1) {
-        perror("socket() 실패");
-        exit(EXIT_FAILURE);
-    }
+    do {
+        // 소켓 생성
+        sockfd = socket(AF_INET, SOCK_STREAM | O_NONBLOCK | O_CLOEXEC, 0);
+        if (sockfd == -1) {
+            if (handle_socket_error()) {
+                continue;
+            }
+            exit(EXIT_FAILURE);
+        }
 
-    // 서버 주소 설정
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SERVER_PORT);
-    if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0) {
-        perror("inet_pton() 실패");
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
+        // 서버 주소 설정
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(SERVER_PORT);
+        if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0) {
+            perror("inet_pton() 실패");
+            close(sockfd);
+            exit(EXIT_FAILURE);
+        }
 
-    // 소켓을 논블로킹 모드로 설정
-    set_nonblocking(sockfd);
-    set_nonblocking(STDIN_FILENO);
+        // 소켓을 논블로킹 모드로 설정
+        // set_nonblocking(sockfd);
+        set_nonblocking(STDIN_FILENO);
+
+        socket_create_ok = 1;
+    } while (!socket_create_ok);
 
     int retries = 0;
     while (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+//        if (handle_connect_error()) {
+//            continue;
+//        }
+
         if (errno == EINPROGRESS) {
             struct pollfd poll_fd;
             poll_fd.fd = sockfd;

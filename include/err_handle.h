@@ -11,5 +11,6 @@ int handle_poll_error();
 int handle_accept_error();
 int handle_receive_error();
 int handle_send_error();
+int handle_connect_error();
 
 #endif // __ERR_HANDLE_H__
